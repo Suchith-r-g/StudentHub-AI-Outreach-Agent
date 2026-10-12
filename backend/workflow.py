@@ -122,13 +122,17 @@ class OutreachWorkflowManager:
 
             # Step 2: Qualification & Deduplication against existing database leads
             logger.info("Step 2: Qualifying candidates and checking evidence...")
-            # Check for existing companies from previously completed runs
-            existing_companies = [
-                row[0] for row in db.query(CompanyLead.company_name).filter(
-                    CompanyLead.is_verified == True,
-                    CompanyLead.run_id != scheduled_run.id
-                ).all()
-            ]
+            # In LIVE MODE, strictly prevent re-contacting companies qualified in prior runs.
+            # In TEST_MODE, allow repeatable evaluation of the sample candidate cohort.
+            if not is_test:
+                existing_companies = [
+                    row[0] for row in db.query(CompanyLead.company_name).filter(
+                        CompanyLead.is_verified == True,
+                        CompanyLead.run_id != scheduled_run.id
+                    ).all()
+                ]
+            else:
+                existing_companies = []
             qualified, rejected = self.qualifier.qualify_candidates(raw_candidates, existing_companies)
 
             scheduled_run.total_verified = len(qualified)

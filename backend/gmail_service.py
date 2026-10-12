@@ -186,13 +186,14 @@ class GmailService:
         # TEST_MODE: Clearly distinguished simulation with simulated metadata
         if settings.TEST_MODE:
             if not creds or not creds.token or not settings.GOOGLE_CLIENT_ID:
+                import uuid
                 logger.info(f"[TEST_MODE] Simulating Gmail API Draft creation for {recipient_email}")
-                sim_timestamp = int(datetime.now(timezone.utc).timestamp())
+                sim_uid = uuid.uuid4().hex[:12]
                 return {
-                    "id": f"simulated_draft_{sim_timestamp}",
+                    "id": f"simulated_draft_{sim_uid}",
                     "message": {
-                        "id": f"simulated_msg_{sim_timestamp}",
-                        "threadId": f"simulated_thread_{sim_timestamp}"
+                        "id": f"simulated_msg_{sim_uid}",
+                        "threadId": f"simulated_thread_{sim_uid}"
                     },
                     "simulated": True,
                     "mode": "test_mode"
