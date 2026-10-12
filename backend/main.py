@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
-from sqlalchemy import desc
+from sqlalchemy import desc, text
 
 from backend.config import settings
 from backend.models import (
@@ -55,7 +55,7 @@ def get_diagnostics(db: Session = Depends(get_db)):
     gmail_status = workflow_manager.gmail_service.is_connected()
     db_ok = True
     try:
-        db.execute("SELECT 1")
+        db.execute(text("SELECT 1"))
     except Exception:
         db_ok = False
 
