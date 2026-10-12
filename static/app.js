@@ -10,8 +10,24 @@ document.addEventListener("DOMContentLoaded", () => {
 
 async function initApp() {
     setupEventListeners();
+    checkUrlAuthParams();
     await fetchStatus();
     await fetchRunsHistory();
+}
+
+function checkUrlAuthParams() {
+    const params = new URLSearchParams(window.location.search);
+    const authError = params.get("auth_error");
+    const authSuccess = params.get("auth_success");
+
+    if (authError) {
+        showToast("⚠️ Gmail Connection Failed: " + decodeURIComponent(authError), "danger");
+        // Clean URL
+        window.history.replaceState({}, document.title, window.location.pathname);
+    } else if (authSuccess) {
+        showToast("🎉 Gmail Account successfully connected!", "success");
+        window.history.replaceState({}, document.title, window.location.pathname);
+    }
 }
 
 function setupEventListeners() {
@@ -56,8 +72,11 @@ async function handleCreateTestDraft() {
             throw new Error(err.detail || "Failed to create test draft");
         }
         const data = await res.json();
-        const modeLabel = data.simulated ? "Simulated Draft" : "Genuine Draft";
-        showToast(`✅ ${modeLabel} created in Gmail! ID: ${data.draft_id}`, "success");
+        if (data.simulated) {
+            showToast("ℹ️ Created SIMULATED draft locally because real Gmail is not connected yet. Click 'Connect Gmail' to create drafts in your real inbox.", "warning");
+        } else {
+            showToast(`✅ Genuine Draft created in your Gmail inbox! ID: ${data.draft_id}`, "success");
+        }
     } catch (err) {
         showToast("Error creating test draft: " + err.message, "danger");
     } finally {
