@@ -122,6 +122,10 @@ class GmailService:
             db.close()
 
     def get_active_credentials(self) -> Optional[Credentials]:
+        """
+        Retrieves active OAuth credentials from database, automatically refreshing if expired.
+        Updates refreshed tokens back to database.
+        """
         db = SessionLocal()
         try:
             token_record = db.query(OAuthToken).filter(OAuthToken.provider == "google").first()
@@ -131,75 +135,172 @@ class GmailService:
             creds = Credentials(
                 token=token_record.access_token,
                 refresh_token=token_record.refresh_token,
-                token_uri=token_record.token_uri,
+                token_uri=token_record.token_uri or "https://oauth2.googleapis.com/token",
                 client_id=token_record.client_id or settings.GOOGLE_CLIENT_ID,
                 client_secret=token_record.client_secret or settings.GOOGLE_CLIENT_SECRET,
                 scopes=token_record.scopes.split() if token_record.scopes else self.scopes
             )
+
+            # Check if expired and refresh if possible
+            from google.auth.transport.requests import Request
+            if creds.expired and creds.refresh_token:
+                try:
+                    logger.info("Gmail OAuth token expired. Refreshing token via refresh_token...")
+                    creds.refresh(Request())
+                    token_record.access_token = creds.token
+                    token_record.expiry = creds.expiry
+                    token_record.updated_at = datetime.now(timezone.utc)
+                    db.commit()
+                    logger.info("Successfully refreshed and persisted updated Gmail OAuth token.")
+                except Exception as e:
+                    logger.error(f"Failed to refresh expired Gmail token: {e}")
+                    # Return creds anyway to allow caller to handle failure
+            elif not creds.valid and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                    token_record.access_token = creds.token
+                    token_record.expiry = creds.expiry
+                    token_record.updated_at = datetime.now(timezone.utc)
+                    db.commit()
+                except Exception as e:
+                    logger.error(f"Failed to refresh invalid Gmail token: {e}")
+
             return creds
         finally:
             db.close()
 
     def is_connected(self) -> Dict[str, Any]:
         """
-        Returns Gmail connectivity status.
-        Transparently communicates whether connected, in test mode, or missing credentials.
+        Returns comprehensive Gmail connectivity and permission diagnostics.
         """
-        creds = self.get_active_credentials()
         configured = bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET)
-
-        if not creds:
-            return {
-                "connected": False,
-                "email": None,
-                "test_mode": settings.TEST_MODE,
-                "configured": configured,
-                "status_label": "Test Simulation Ready" if settings.TEST_MODE else "Disconnected (OAuth Required)"
-            }
-
         db = SessionLocal()
         try:
             token_record = db.query(OAuthToken).filter(OAuthToken.provider == "google").first()
-            email = token_record.connected_email if token_record else None
+            if not token_record or not token_record.access_token:
+                return {
+                    "connected": False,
+                    "email": None,
+                    "test_mode": settings.TEST_MODE,
+                    "configured": configured,
+                    "has_compose_scope": False,
+                    "granted_scopes": [],
+                    "status_label": "Test Simulation Ready" if settings.TEST_MODE else "Disconnected (OAuth Required)"
+                }
+
+            creds = self.get_active_credentials()
+            email = token_record.connected_email
+            granted_scopes = (token_record.scopes or "").split()
+            compose_scope = "https://www.googleapis.com/auth/gmail.compose"
+            has_compose_scope = compose_scope in granted_scopes
+
+            status_label = f"Connected ({email})" if email else "Connected"
+            if not has_compose_scope:
+                status_label = f"Connected ({email}) - Missing Compose Scope"
+
             return {
                 "connected": True,
                 "email": email,
                 "test_mode": settings.TEST_MODE,
                 "configured": configured,
-                "status_label": f"Connected ({email})"
+                "has_compose_scope": has_compose_scope,
+                "granted_scopes": granted_scopes,
+                "status_label": status_label
             }
         finally:
             db.close()
+
+    def check_connection_diagnostics(self) -> Dict[str, Any]:
+        """
+        Performs live diagnostic probe to Gmail API:
+        Validates profile access, draft creation permissions, and token validity.
+        """
+        status = self.is_connected()
+        if not status["connected"]:
+            return {
+                "healthy": False,
+                "connected": False,
+                "reason": "No OAuth credentials stored. User must connect Gmail.",
+                "details": status
+            }
+
+        creds = self.get_active_credentials()
+        try:
+            service = build("gmail", "v1", credentials=creds)
+            profile = service.users().getProfile(userId="me").execute()
+            return {
+                "healthy": True,
+                "connected": True,
+                "email": profile.get("emailAddress"),
+                "messages_total": profile.get("messagesTotal"),
+                "has_compose_scope": status.get("has_compose_scope", False),
+                "granted_scopes": status.get("granted_scopes", [])
+            }
+        except HttpError as e:
+            return {
+                "healthy": False,
+                "connected": True,
+                "http_status": e.status_code,
+                "reason": f"Gmail API error: {e.reason or str(e)}",
+                "needs_reauth": e.status_code in (401, 403)
+            }
+        except Exception as e:
+            return {
+                "healthy": False,
+                "connected": True,
+                "reason": str(e),
+                "needs_reauth": True
+            }
+
+    def create_one_test_draft(self) -> Dict[str, Any]:
+        """
+        Creates exactly one clearly labelled test draft in the connected Gmail account
+        without sending it, and confirms its existence.
+        """
+        subject = f"[TEST DRAFT] StudentHub Outreach Integration Probe ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})"
+        body = (
+            "Hello,\n\n"
+            "This is a verified test draft created by StudentHub AI Outreach Agent to test end-to-end "
+            "Google OAuth and Gmail API draft creation permissions.\n\n"
+            "This email is deliberately created as an UNSENT DRAFT and will NEVER be sent automatically.\n\n"
+            "Best regards,\n"
+            f"{settings.FOUNDER_NAME}\n"
+            f"{settings.FOUNDER_ROLE}, {settings.FOUNDER_COMPANY}"
+        )
+        return self.create_draft(
+            recipient_email=settings.OWNER_EMAIL,
+            subject=subject,
+            body_text=body
+        )
 
     def create_draft(self, recipient_email: str, subject: str, body_text: str) -> Dict[str, Any]:
         """
         Creates a genuine unsent draft in Gmail using the Gmail API (drafts.create).
         Never sends the email.
         In LIVE MODE (TEST_MODE=false), strictly calls the real Gmail API or fails visibly.
-        In TEST_MODE (TEST_MODE=true), explicitly labels the draft as a simulated mock.
+        In TEST_MODE (TEST_MODE=true), explicitly labels the draft as a simulated mock unless real creds are present.
         """
         if not recipient_email or "@" not in recipient_email:
             raise ValueError(f"Invalid or missing recipient email: '{recipient_email}'. Draft creation aborted.")
 
         creds = self.get_active_credentials()
 
-        # TEST_MODE: Clearly distinguished simulation with simulated metadata
-        if settings.TEST_MODE:
-            if not creds or not creds.token or not settings.GOOGLE_CLIENT_ID:
-                import uuid
-                logger.info(f"[TEST_MODE] Simulating Gmail API Draft creation for {recipient_email}")
-                sim_uid = uuid.uuid4().hex[:12]
-                return {
-                    "id": f"simulated_draft_{sim_uid}",
-                    "message": {
-                        "id": f"simulated_msg_{sim_uid}",
-                        "threadId": f"simulated_thread_{sim_uid}"
-                    },
-                    "simulated": True,
-                    "mode": "test_mode"
-                }
+        # TEST_MODE: Clearly distinguished simulation with simulated metadata if credentials missing
+        if settings.TEST_MODE and (not creds or not creds.token or not settings.GOOGLE_CLIENT_ID):
+            import uuid
+            logger.info(f"[TEST_MODE] Simulating Gmail API Draft creation for {recipient_email}")
+            sim_uid = uuid.uuid4().hex[:12]
+            return {
+                "id": f"simulated_draft_{sim_uid}",
+                "message": {
+                    "id": f"simulated_msg_{sim_uid}",
+                    "threadId": f"simulated_thread_{sim_uid}"
+                },
+                "simulated": True,
+                "mode": "test_mode"
+            }
 
-        # LIVE MODE: Must have real credentials
+        # If we have valid credentials (or in LIVE MODE), create real genuine draft
         if not creds:
             raise PermissionError(
                 "Gmail account not connected. In LIVE MODE (TEST_MODE=false), a real connected Gmail account is required. "
@@ -211,7 +312,16 @@ class GmailService:
             message = EmailMessage()
             message.set_content(body_text)
             message["To"] = recipient_email
-            message["From"] = settings.OWNER_EMAIL
+            
+            # Use authenticated owner email
+            db = SessionLocal()
+            try:
+                tok = db.query(OAuthToken).filter(OAuthToken.provider == "google").first()
+                from_email = (tok.connected_email if tok else None) or settings.OWNER_EMAIL
+            finally:
+                db.close()
+
+            message["From"] = from_email
             message["Subject"] = subject
 
             encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
@@ -220,6 +330,8 @@ class GmailService:
             draft = service.users().drafts().create(userId="me", body=create_message).execute()
             draft["simulated"] = False
             draft["mode"] = "live"
+            draft["connected_account"] = from_email
+            logger.info(f"Successfully created genuine Gmail draft: ID={draft.get('id')}")
             return draft
         except HttpError as e:
             logger.error(f"Gmail API HttpError while creating draft: {e}")
@@ -232,20 +344,19 @@ class GmailService:
         """
         Sends the research report exclusively to the owner email address.
         In LIVE MODE (TEST_MODE=false), requires authentic Gmail connection.
-        In TEST_MODE (TEST_MODE=true), safely simulates delivery without error.
+        In TEST_MODE (TEST_MODE=true), safely simulates delivery if credentials are not configured.
         """
         creds = self.get_active_credentials()
 
-        if settings.TEST_MODE:
-            if not creds or not creds.token or not settings.GOOGLE_CLIENT_ID:
-                logger.info(f"[TEST_MODE] Simulating research report email sent to owner {to_email}")
-                sim_timestamp = int(datetime.now(timezone.utc).timestamp())
-                return {
-                    "id": f"simulated_report_msg_{sim_timestamp}",
-                    "threadId": f"simulated_report_thread_{sim_timestamp}",
-                    "simulated": True,
-                    "mode": "test_mode"
-                }
+        if settings.TEST_MODE and (not creds or not creds.token or not settings.GOOGLE_CLIENT_ID):
+            logger.info(f"[TEST_MODE] Simulating research report email sent to owner {to_email}")
+            sim_timestamp = int(datetime.now(timezone.utc).timestamp())
+            return {
+                "id": f"simulated_report_msg_{sim_timestamp}",
+                "threadId": f"simulated_report_thread_{sim_timestamp}",
+                "simulated": True,
+                "mode": "test_mode"
+            }
 
         if not creds:
             raise PermissionError(
@@ -258,7 +369,15 @@ class GmailService:
             message.set_content(text_content)
             message.add_alternative(html_content, subtype="html")
             message["To"] = to_email
-            message["From"] = settings.OWNER_EMAIL
+
+            db = SessionLocal()
+            try:
+                tok = db.query(OAuthToken).filter(OAuthToken.provider == "google").first()
+                from_email = (tok.connected_email if tok else None) or settings.OWNER_EMAIL
+            finally:
+                db.close()
+
+            message["From"] = from_email
             message["Subject"] = subject
 
             encoded_message = base64.urlsafe_b64encode(message.as_bytes()).decode()

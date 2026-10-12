@@ -30,6 +30,9 @@ function setupEventListeners() {
     // Google Connect
     document.getElementById("btn-connect-gmail").addEventListener("click", handleConnectGmail);
 
+    // Test Draft Action
+    document.getElementById("btn-test-draft").addEventListener("click", handleCreateTestDraft);
+
     // Modal Close
     document.getElementById("modal-close-btn").addEventListener("click", closeModal);
     document.getElementById("modal-close-backdrop").addEventListener("click", closeModal);
@@ -40,6 +43,28 @@ function setupEventListeners() {
 // ---------------------------
 // API Interactions
 // ---------------------------
+
+async function handleCreateTestDraft() {
+    const btn = document.getElementById("btn-test-draft");
+    btn.disabled = true;
+    btn.innerText = "Creating...";
+
+    try {
+        const res = await fetch("/api/drafts/test-probe", { method: "POST" });
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || "Failed to create test draft");
+        }
+        const data = await res.json();
+        const modeLabel = data.simulated ? "Simulated Draft" : "Genuine Draft";
+        showToast(`✅ ${modeLabel} created in Gmail! ID: ${data.draft_id}`, "success");
+    } catch (err) {
+        showToast("Error creating test draft: " + err.message, "danger");
+    } finally {
+        btn.disabled = false;
+        btn.innerText = "Create 1 Test Draft";
+    }
+}
 
 async function fetchStatus() {
     try {

@@ -116,24 +116,46 @@ class OutreachWorkflowManager:
             db.refresh(scheduled_run)
 
             # Step 1: Research Candidate Companies
-            logger.info(f"Step 1: Searching for qualified partner companies using provider '{provider}' (TEST_MODE={is_test})...")
-            raw_candidates = await self.search_client.search_studenthub_partners()
-            scheduled_run.total_researched = len(raw_candidates)
-
-            # Step 2: Qualification & Deduplication against existing database leads
-            logger.info("Step 2: Qualifying candidates and checking evidence...")
-            # In LIVE MODE, strictly prevent re-contacting companies qualified in prior runs.
-            # In TEST_MODE, allow repeatable evaluation of the sample candidate cohort.
+            # Compute cohort index based on total previous runs for search diversity
+            total_prior_runs = db.query(ScheduledRun).count()
+            
+            # Fetch historically qualified domains and names
             if not is_test:
                 existing_companies = [
                     row[0] for row in db.query(CompanyLead.company_name).filter(
                         CompanyLead.is_verified == True,
                         CompanyLead.run_id != scheduled_run.id
-                    ).all()
+                    ).all() if row[0]
+                ]
+                existing_domains = [
+                    row[0] for row in db.query(CompanyLead.normalized_domain).filter(
+                        CompanyLead.is_verified == True,
+                        CompanyLead.run_id != scheduled_run.id
+                    ).all() if row[0]
                 ]
             else:
                 existing_companies = []
-            qualified, rejected = self.qualifier.qualify_candidates(raw_candidates, existing_companies)
+                existing_domains = []
+
+            logger.info(
+                f"Step 1: Searching for qualified partner companies using provider '{provider}' "
+                f"(TEST_MODE={is_test}, cohort_index={total_prior_runs}, exclude_domains={len(existing_domains)})..."
+            )
+            raw_candidates = await self.search_client.search_studenthub_partners(
+                target_count=15,
+                cohort_index=total_prior_runs,
+                exclude_domains=set(existing_domains)
+            )
+            scheduled_run.total_researched = len(raw_candidates)
+
+            # Step 2: Qualification & Deduplication against existing database leads
+            logger.info("Step 2: Qualifying candidates and checking evidence against historical records...")
+            qualified, rejected = self.qualifier.qualify_candidates(
+                candidates=raw_candidates,
+                existing_company_names=existing_companies,
+                existing_domains=existing_domains,
+                allow_reconsideration=False
+            )
 
             scheduled_run.total_verified = len(qualified)
             scheduled_run.total_rejected = len(rejected)
@@ -141,11 +163,15 @@ class OutreachWorkflowManager:
             # Step 3: Persist Qualified Leads and Generate AI Personalized Emails
             logger.info(f"Step 3: Persisting {len(qualified)} qualified leads and {len(rejected)} rejected candidates...")
             
+            now_utc = datetime.now(timezone.utc)
+
             # Persist Qualified Leads
             for cand in qualified:
+                norm_dom = cand.get("normalized_domain") or cand.get("website", "")
                 lead = CompanyLead(
                     run_id=scheduled_run.id,
                     company_name=cand["company_name"],
+                    normalized_domain=norm_dom,
                     website=cand["website"],
                     industry=cand.get("industry", "Technology"),
                     overview=cand.get("overview", ""),
@@ -153,6 +179,7 @@ class OutreachWorkflowManager:
                     presence=cand.get("presence"),
                     approach_rationale=cand.get("approach_rationale", ""),
                     hiring_information=cand.get("hiring_information"),
+                    search_query=cand.get("search_query"),
                     contact_email=cand.get("contact_email"),
                     contact_name=cand.get("contact_name"),
                     contact_role=cand.get("contact_role"),
@@ -160,7 +187,9 @@ class OutreachWorkflowManager:
                     is_verified=True,
                     verification_status=cand.get("verification_status", "Officially Verified"),
                     disqualification_reason=None,
-                    research_timestamp=cand.get("research_timestamp", datetime.now(timezone.utc))
+                    research_timestamp=cand.get("research_timestamp", now_utc),
+                    first_seen_at=now_utc,
+                    last_seen_at=now_utc
                 )
                 db.add(lead)
                 db.flush()
@@ -173,7 +202,7 @@ class OutreachWorkflowManager:
                         source_url=ev.get("source_url", cand["website"]),
                         page_title=ev.get("page_title"),
                         evidence_snippet=ev.get("evidence_snippet", ""),
-                        retrieved_at=datetime.now(timezone.utc)
+                        retrieved_at=now_utc
                     )
                     db.add(evidence_record)
 
@@ -194,11 +223,12 @@ class OutreachWorkflowManager:
                 )
                 db.add(draft_record)
 
-            # Persist Rejected Leads (for transparency and full audit history)
+            # Persist Rejected Leads (for transparency, audit history, and deduplication)
             for rej in rejected:
                 rej_lead = CompanyLead(
                     run_id=scheduled_run.id,
                     company_name=rej.get("company_name", "Unknown"),
+                    normalized_domain=rej.get("normalized_domain"),
                     website=rej.get("website", ""),
                     industry=rej.get("industry", "Technology"),
                     overview=rej.get("overview", "Disqualified during qualification review."),
@@ -206,11 +236,14 @@ class OutreachWorkflowManager:
                     presence=rej.get("presence"),
                     approach_rationale=rej.get("approach_rationale", "N/A"),
                     hiring_information=rej.get("hiring_information"),
+                    search_query=rej.get("search_query"),
                     contact_email=rej.get("contact_email"),
                     is_verified=False,
                     verification_status="Disqualified",
                     disqualification_reason=rej.get("disqualification_reason", "Failed qualification criteria."),
-                    research_timestamp=datetime.now(timezone.utc)
+                    research_timestamp=now_utc,
+                    first_seen_at=now_utc,
+                    last_seen_at=now_utc
                 )
                 db.add(rej_lead)
                 db.flush()
@@ -221,7 +254,7 @@ class OutreachWorkflowManager:
                         source_url=ev.get("source_url", rej.get("website", "")),
                         page_title=ev.get("page_title"),
                         evidence_snippet=ev.get("evidence_snippet", ""),
-                        retrieved_at=datetime.now(timezone.utc)
+                        retrieved_at=now_utc
                     )
                     db.add(evidence_record)
 
@@ -299,6 +332,7 @@ class OutreachWorkflowManager:
                     )
                     draft.gmail_draft_id = gmail_resp.get("id")
                     draft.gmail_message_id = gmail_resp.get("message", {}).get("id")
+                    draft.connected_account = gmail_resp.get("connected_account")
                     draft.is_approved = True
                     draft.creation_status = "created" if not gmail_resp.get("simulated") else "simulated_test"
                     draft.error_message = None
@@ -309,6 +343,7 @@ class OutreachWorkflowManager:
                         "company": draft.lead.company_name,
                         "status": "created",
                         "gmail_draft_id": draft.gmail_draft_id,
+                        "connected_account": draft.connected_account,
                         "simulated": bool(gmail_resp.get("simulated"))
                     })
                 except Exception as e:

@@ -1,7 +1,8 @@
 import pytest
-from backend.research import CompanyQualifier, WebSearchClient
+from datetime import datetime, timezone
+from backend.research import CompanyQualifier, WebSearchClient, normalize_domain
 from backend.personalization import OutreachPersonalizer
-from backend.models import init_db, SessionLocal, ScheduledRun, CompanyLead, GmailDraft
+from backend.models import init_db, SessionLocal, ScheduledRun, CompanyLead, GmailDraft, OAuthToken
 from backend.workflow import OutreachWorkflowManager
 from backend.gmail_service import GmailService
 from backend.config import settings
@@ -9,6 +10,12 @@ from backend.config import settings
 @pytest.fixture(autouse=True)
 def setup_db():
     init_db()
+
+def test_domain_normalization():
+    assert normalize_domain("https://www.kellton.com/careers/") == "kellton.com"
+    assert normalize_domain("http://DarwinBox.com?ref=google#team") == "darwinbox.com"
+    assert normalize_domain("https://persistent.com:443/products") == "persistent.com"
+    assert normalize_domain("") == ""
 
 def test_qualification_rules():
     qualifier = CompanyQualifier()
@@ -50,14 +57,21 @@ def test_job_board_filtering():
     assert len(rejected) == 1
     assert "Job aggregator/directory" in rejected[0]["disqualification_reason"]
 
-def test_duplicate_prevention():
+def test_duplicate_prevention_domain_and_name():
     qualifier = CompanyQualifier()
     existing_companies = ["Kellton Tech", "Persistent Systems"]
+    existing_domains = ["kellton.com", "persistent.com"]
 
     candidates = [
         {
-            "company_name": "kellton tech", # case-insensitive duplicate
-            "website": "https://kellton.com",
+            "company_name": "kellton tech", # case-insensitive duplicate name
+            "website": "https://www.kellton.com",
+            "evidence_items": [{"source_url": "url", "evidence_snippet": "data"}],
+            "approach_rationale": "Fit"
+        },
+        {
+            "company_name": "Persistent Group", # duplicate domain
+            "website": "https://persistent.com/careers",
             "evidence_items": [{"source_url": "url", "evidence_snippet": "data"}],
             "approach_rationale": "Fit"
         },
@@ -68,11 +82,16 @@ def test_duplicate_prevention():
             "approach_rationale": "Fit"
         }
     ]
-    qualified, rejected = qualifier.qualify_candidates(candidates, existing_companies)
+    qualified, rejected = qualifier.qualify_candidates(
+        candidates,
+        existing_company_names=existing_companies,
+        existing_domains=existing_domains
+    )
     assert len(qualified) == 1
     assert qualified[0]["company_name"] == "Happiest Minds"
-    assert len(rejected) == 1
+    assert len(rejected) == 2
     assert "already qualified in a previous run" in rejected[0]["disqualification_reason"]
+    assert "already qualified in a previous run" in rejected[1]["disqualification_reason"]
 
 def test_missing_optional_contact_does_not_reject():
     qualifier = CompanyQualifier()
@@ -114,14 +133,49 @@ def test_draft_creation_safety_and_idempotency():
     with pytest.raises(ValueError):
         gmail_service.create_draft(recipient_email="invalid_address", subject="Sub", body_text="Body")
 
-    # In test mode, creating draft returns simulated draft without network errors
+    # In test mode without credentials, returns simulated draft with simulated flag
     draft = gmail_service.create_draft(recipient_email="test@example.com", subject="Test", body_text="Body")
     assert "id" in draft
     assert draft.get("simulated") is True
     assert "simulated" in draft["id"]
+
+def test_one_test_draft_probe():
+    gmail_service = GmailService()
+    probe_draft = gmail_service.create_one_test_draft()
+    assert "id" in probe_draft
+    assert "simulated" in probe_draft or probe_draft.get("mode") == "live"
 
 def test_serpapi_health_check():
     client = WebSearchClient()
     health = client.check_health()
     assert "status" in health
     assert "provider" in health
+
+def test_gmail_diagnostics_without_token():
+    gmail_service = GmailService()
+    db = SessionLocal()
+    # Temporarily remove any token for testing disconnected state
+    db.query(OAuthToken).delete()
+    db.commit()
+    db.close()
+    
+    diag = gmail_service.check_connection_diagnostics()
+    assert diag["healthy"] is False
+    assert diag["connected"] is False
+    assert "No OAuth credentials stored" in diag["reason"]
+
+def test_query_cohorts_diversity():
+    client = WebSearchClient()
+    assert len(client.SEARCH_QUERY_COHORTS) >= 4
+    # All cohorts must contain query strings
+    for cohort in client.SEARCH_QUERY_COHORTS:
+        assert len(cohort) >= 3
+        for q in cohort:
+            assert isinstance(q, str) and len(q) > 10
+
+def test_mock_vs_live_provider_label():
+    client = WebSearchClient()
+    if client.test_mode:
+        health = client.check_health()
+        assert health["provider"] == "mock"
+        assert health["test_mode"] is True

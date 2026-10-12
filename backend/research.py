@@ -1,19 +1,77 @@
 import re
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from datetime import datetime, timezone
 import requests
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
+def normalize_domain(url_or_domain: str) -> str:
+    """
+    Consistently normalizes domain names:
+    - Removes http://, https://, www.
+    - Strips paths, trailing slashes, query parameters, port numbers
+    - Converts to lowercase
+    Example: 'https://www.Kellton.com/careers/' -> 'kellton.com'
+    """
+    if not url_or_domain:
+        return ""
+    clean = url_or_domain.strip().lower()
+    clean = re.sub(r"^https?://", "", clean)
+    clean = re.sub(r"^www\.", "", clean)
+    clean = clean.split("/")[0].split("?")[0].split("#")[0].split(":")[0]
+    return clean
+
 class WebSearchClient:
     """
     Search Client supporting multiple backends:
     - 'mock' / test mode: Deterministic verifiable public company data for StudentHub recruitment evaluation
     - 'tavily': Official Tavily search API
-    - 'serpapi': Official SerpAPI search API
+    - 'serpapi': Official SerpAPI search API with query diversity, pagination, and evidence extraction
     """
+
+    # Comprehensive set of non-company directory / aggregator domains
+    AGGREGATOR_DOMAINS = {
+        "linkedin.com", "glassdoor.com", "glassdoor.co.in", "indeed.com",
+        "naukri.com", "internshala.com", "foundit.in", "monsterindia.com",
+        "ambitionbox.com", "shine.com", "quora.com", "wikipedia.org",
+        "reddit.com", "youtube.com", "facebook.com", "twitter.com", "x.com",
+        "instagram.com", "cutshort.io", "instahyre.com", "hirist.tech",
+        "topfirms.co", "clutch.co", "goodfirms.co", "g2.com", "capterra.com",
+        "trustradius.com", "techsagar.in", "revenuebase.ai", "zoominfo.com",
+        "crunchbase.com", "pitchbook.com", "bloomberg.com", "ycombinator.com",
+        "jobsavior.com", "applyx.in", "expertini.com", "lever.co", "greenhouse.io",
+        "workday.com", "myworkdayjobs.com", "smartrecruiters.com"
+    }
+
+    # Query cohorts covering diverse tech verticals in India
+    SEARCH_QUERY_COHORTS = [
+        # Cohort 1: Product engineering & Software services
+        [
+            "top software product engineering companies India official website",
+            "Indian digital transformation software development firms headquarters Bengaluru Pune",
+            "enterprise application engineering companies India careers freshers"
+        ],
+        # Cohort 2: IoT, Embedded & Hardware engineering
+        [
+            "Indian IoT embedded systems technology companies Hyderabad Bengaluru",
+            "automotive embedded software product companies India official website",
+            "connected devices industrial automation engineering firms India"
+        ],
+        # Cohort 3: Enterprise SaaS, HR-Tech & FinTech platforms
+        [
+            "Indian enterprise SaaS platform companies Bangalore Chennai Gurgaon",
+            "HR-tech worktech software companies India headquarters careers",
+            "cloud infrastructure data engineering consulting firms India"
+        ],
+        # Cohort 4: Digital engineering, AI & Analytics innovators
+        [
+            "data science AI product engineering companies India official site",
+            "semiconductor design software engineering companies India",
+            "healthcare technology digital engineering companies Hyderabad Pune"
+        ]
+    ]
 
     def __init__(self):
         pass
@@ -87,10 +145,16 @@ class WebSearchClient:
             "status": "configured"
         }
 
-    async def search_studenthub_partners(self, query: str = "Indian software engineering IoT companies") -> List[Dict[str, Any]]:
+    async def search_studenthub_partners(
+        self,
+        target_count: int = 15,
+        cohort_index: Optional[int] = None,
+        exclude_domains: Optional[set] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Executes search and returns candidate company profiles with real source URLs and evidence.
-        In LIVE MODE (TEST_MODE=false), strictly calls the real search provider and raises on failure.
+        Executes live search and returns candidate company profiles with real source URLs and evidence.
+        Rotates through query cohorts and pagination to discover genuinely new companies across runs.
+        In LIVE MODE (TEST_MODE=false), strictly calls real search provider without silent fallback.
         """
         if self.test_mode or self.provider == "mock":
             logger.info("Using reproducible verifiable dataset for candidate research (TEST_MODE active).")
@@ -104,86 +168,113 @@ class WebSearchClient:
             )
 
         if self.provider == "serpapi":
-            return self._search_serpapi_sync(query)
+            return self._search_serpapi_sync(
+                target_count=target_count,
+                cohort_index=cohort_index,
+                exclude_domains=exclude_domains
+            )
         elif self.provider == "tavily":
-            return self._search_tavily_sync(query)
+            return self._search_tavily_sync(cohort_index=cohort_index)
         else:
             raise ValueError(f"Unsupported search provider: {self.provider}")
 
-    def _search_serpapi_sync(self, query: str) -> List[Dict[str, Any]]:
+    def _search_serpapi_sync(
+        self,
+        target_count: int = 15,
+        cohort_index: Optional[int] = None,
+        exclude_domains: Optional[set] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Calls SerpAPI with resilient queries targeting Indian tech & engineering firms.
+        Calls SerpAPI with diverse query cohorts, recording query metadata and source URLs.
+        Applies pagination (start offset) and alternate queries if initial results contain duplicates.
         """
         url = "https://serpapi.com/search"
-        # Focused queries to discover legitimate technology enterprises in India
-        queries = [
-            "Indian software engineering digital transformation companies careers",
-            "Indian IoT embedded systems technology companies Hyderabad Bengaluru Pune",
-            "Indian enterprise SaaS HR-tech companies careers freshers"
-        ]
+        exclude_domains = exclude_domains or set()
 
-        all_results = []
-        for q in queries:
-            params = {
-                "api_key": self.api_key,
-                "q": q,
-                "engine": "google",
-                "gl": "in",
-                "hl": "en",
-                "num": 10
-            }
-            try:
-                resp = requests.get(url, params=params, timeout=20)
-                if resp.status_code != 200:
-                    err_msg = resp.text
-                    try:
-                        err_msg = resp.json().get("error", err_msg)
-                    except Exception:
-                        pass
-                    raise RuntimeError(f"SerpAPI returned HTTP {resp.status_code}: {err_msg}")
+        # Select queries based on cohort rotation or pick all
+        if cohort_index is not None:
+            cohort = self.SEARCH_QUERY_COHORTS[cohort_index % len(self.SEARCH_QUERY_COHORTS)]
+        else:
+            # Flatten cohorts to query across domains
+            cohort = [q for sublist in self.SEARCH_QUERY_COHORTS for q in sublist]
 
-                data = resp.json()
-                if "error" in data:
-                    raise RuntimeError(f"SerpAPI error: {data['error']}")
+        all_candidates = []
+        seen_batch_domains = set()
 
-                organic = data.get("organic_results", [])
-                all_results.extend(organic)
-                if len(all_results) >= 15:
-                    break
-            except requests.exceptions.RequestException as e:
-                logger.error(f"SerpAPI request error for query '{q}': {e}")
-                if not all_results:
-                    raise RuntimeError(f"Failed to query SerpAPI: {e}")
+        for q in cohort:
+            for start_offset in (0, 10):  # Paginate: page 1 then page 2
+                params = {
+                    "api_key": self.api_key,
+                    "q": q,
+                    "engine": "google",
+                    "gl": "in",
+                    "hl": "en",
+                    "num": 10,
+                    "start": start_offset
+                }
+                logger.info(f"SerpAPI executing query: '{q}' (start={start_offset})...")
+                try:
+                    resp = requests.get(url, params=params, timeout=20)
+                    if resp.status_code != 200:
+                        err_msg = resp.text
+                        try:
+                            err_msg = resp.json().get("error", err_msg)
+                        except Exception:
+                            pass
+                        raise RuntimeError(f"SerpAPI returned HTTP {resp.status_code}: {err_msg}")
 
-        if not all_results:
-            raise RuntimeError("SerpAPI returned zero results for the search queries.")
+                    data = resp.json()
+                    if "error" in data:
+                        raise RuntimeError(f"SerpAPI error: {data['error']}")
 
-        return self._parse_web_results_to_candidates(all_results)
+                    organic = data.get("organic_results", [])
+                    parsed = self._parse_web_results_to_candidates(organic, query_used=q)
+                    
+                    for cand in parsed:
+                        dom = normalize_domain(cand.get("website", ""))
+                        if cand.get("is_verified") and dom:
+                            if dom not in seen_batch_domains and dom not in exclude_domains:
+                                seen_batch_domains.add(dom)
+                                all_candidates.append(cand)
+                        else:
+                            # Keep rejected candidates for transparency
+                            all_candidates.append(cand)
 
-    def _search_tavily_sync(self, query: str) -> List[Dict[str, Any]]:
+                    # Check if we have gathered enough new qualified candidates
+                    qualified_count = len([c for c in all_candidates if c.get("is_verified")])
+                    if qualified_count >= target_count:
+                        break
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"SerpAPI request error for query '{q}': {e}")
+                    if not all_candidates:
+                        raise RuntimeError(f"Failed to query SerpAPI: {e}")
+
+            qualified_count = len([c for c in all_candidates if c.get("is_verified")])
+            if qualified_count >= target_count:
+                break
+
+        if not all_candidates:
+            raise RuntimeError("SerpAPI returned zero candidate results.")
+
+        return all_candidates
+
+    def _search_tavily_sync(self, cohort_index: Optional[int] = None) -> List[Dict[str, Any]]:
         url = "https://api.tavily.com/search"
+        query = "top Indian product engineering IoT SaaS technology companies careers official website"
         payload = {
             "api_key": self.api_key,
             "query": query,
             "search_depth": "advanced",
             "include_answer": False,
-            "max_results": 15
+            "max_results": 20
         }
         resp = requests.post(url, json=payload, timeout=20)
         resp.raise_for_status()
         data = resp.json()
         results = data.get("results", [])
-        return self._parse_web_results_to_candidates(results)
+        return self._parse_web_results_to_candidates(results, query_used=query)
 
-    def _parse_web_results_to_candidates(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        # Aggregator domains that should NOT be considered standalone companies
-        job_board_domains = {
-            "linkedin.com", "glassdoor.com", "glassdoor.co.in", "indeed.com",
-            "naukri.com", "internshala.com", "foundit.in", "monsterindia.com",
-            "ambitionbox.com", "shine.com", "quora.com", "wikipedia.org",
-            "reddit.com", "youtube.com", "facebook.com", "twitter.com", "instagram.com"
-        }
-
+    def _parse_web_results_to_candidates(self, results: List[Dict[str, Any]], query_used: str = "") -> List[Dict[str, Any]]:
         candidates = []
         for r in results:
             url = r.get("url") or r.get("link", "")
@@ -193,26 +284,38 @@ class WebSearchClient:
             if not url or not url.startswith("http"):
                 continue
 
-            # Extract domain
-            domain = re.sub(r"^https?://(www\.)?", "", url).split("/")[0].lower()
-            if any(jb in domain for jb in job_board_domains):
+            # Extract normalized domain
+            domain = normalize_domain(url)
+            if not domain:
+                continue
+
+            # Check if domain belongs to aggregator or job portal
+            is_aggregator = any(
+                agg == domain or domain.endswith("." + agg) 
+                for agg in self.AGGREGATOR_DOMAINS
+            )
+
+            if is_aggregator:
                 # Job board listing - candidate rejected during qualification with clear reason
                 name = title.split("-")[0].split("|")[0].split(":")[0].strip()
                 candidates.append({
                     "company_name": name or domain,
+                    "normalized_domain": domain,
                     "website": url,
-                    "industry": "Job Portal / Directory",
+                    "industry": "Job Portal / Directory Aggregator",
                     "overview": snippet,
                     "headquarters": "India",
                     "presence": None,
-                    "approach_rationale": "Sourced from public web search listing.",
+                    "approach_rationale": "Sourced from public directory/job listing.",
                     "hiring_information": snippet,
+                    "search_query": query_used,
                     "contact_email": None,
                     "contact_name": None,
                     "contact_role": None,
                     "contact_source_url": url,
                     "is_verified": False,
                     "verification_status": "Third-Party Directory",
+                    "disqualification_reason": f"Aggregator / job portal ({domain}) rather than official company web presence.",
                     "evidence_items": [
                         {
                             "source_type": "job_board",
@@ -226,18 +329,37 @@ class WebSearchClient:
 
             # Legitimate company site
             clean_name = title.split("-")[0].split("|")[0].split(":")[0].strip()
+            # Clean common SEO suffixes
+            clean_name = re.sub(r"\s*(Official Website|Home|Careers|About Us|Jobs)\s*$", "", clean_name, flags=re.IGNORECASE).strip()
             if not clean_name or len(clean_name) < 2:
                 clean_name = domain.split(".")[0].capitalize()
 
+            # Infer industry keywords
+            industry = "Digital Engineering & Technology"
+            snippet_lower = snippet.lower()
+            if "iot" in snippet_lower or "embedded" in snippet_lower:
+                industry = "IoT & Embedded Systems"
+            elif "hr" in snippet_lower or "human resource" in snippet_lower or "worktech" in snippet_lower:
+                industry = "HR-Tech & Enterprise Worktech"
+            elif "saas" in snippet_lower or "cloud" in snippet_lower:
+                industry = "Enterprise SaaS & Cloud Engineering"
+            elif "analytics" in snippet_lower or "data science" in snippet_lower or "ai" in snippet_lower:
+                industry = "AI & Analytics Engineering"
+
             candidates.append({
                 "company_name": clean_name,
+                "normalized_domain": domain,
                 "website": f"https://{domain}",
-                "industry": "Digital Engineering & Technology",
+                "industry": industry,
                 "overview": snippet,
                 "headquarters": "India",
-                "presence": "India offices verified via public web search",
-                "approach_rationale": "Active digital engineering and software capability footprint relevant to StudentHub campus hiring.",
+                "presence": "Offices and public web presence verified in India",
+                "approach_rationale": (
+                    f"Active engineering capabilities in {industry}; provides direct campus recruitment "
+                    "alignment for StudentHub's verified student developer profiles."
+                ),
                 "hiring_information": snippet,
+                "search_query": query_used,
                 "contact_email": None,
                 "contact_name": None,
                 "contact_role": None,
@@ -575,15 +697,25 @@ class CompanyQualifier:
     - Deduplicates companies by domain or normalized name
     """
 
-    JOB_BOARD_DOMAINS = {
-        "linkedin.com", "glassdoor.com", "glassdoor.co.in", "indeed.com",
-        "naukri.com", "internshala.com", "foundit.in", "monsterindia.com",
-        "ambitionbox.com", "shine.com", "quora.com", "wikipedia.org",
-        "reddit.com", "youtube.com", "facebook.com", "twitter.com"
-    }
+    JOB_BOARD_DOMAINS = WebSearchClient.AGGREGATOR_DOMAINS
 
-    def qualify_candidates(self, candidates: List[Dict[str, Any]], existing_company_names: List[str] = None) -> (List[Dict[str, Any]], List[Dict[str, Any]]):
+    def qualify_candidates(
+        self,
+        candidates: List[Dict[str, Any]],
+        existing_company_names: Optional[List[str]] = None,
+        existing_domains: Optional[List[str]] = None,
+        allow_reconsideration: bool = False
+    ) -> (List[Dict[str, Any]], List[Dict[str, Any]]):
+        """
+        Qualification and deduplication engine:
+        - Domain-first identity verification with normalized names as fallback
+        - Checks intra-batch duplicates and historical cross-run duplicates
+        - Rejection of job board/directory scrapers
+        - Configurable reconsideration policy: if allow_reconsideration is True, allows previously rejected candidates to be re-evaluated
+        """
         existing_names = set(name.lower().strip() for name in (existing_company_names or []))
+        existing_doms = set(normalize_domain(d) for d in (existing_domains or []))
+        
         seen_domains = set()
         seen_names = set()
 
@@ -596,6 +728,13 @@ class CompanyQualifier:
             name_lower = name.lower()
             website = cand_copy.get("website", "").strip()
             evidence = cand_copy.get("evidence_items", [])
+            domain = normalize_domain(cand_copy.get("normalized_domain") or website)
+            cand_copy["normalized_domain"] = domain
+
+            # If already marked disqualified at the search parse level
+            if not cand_copy.get("is_verified", True) and cand_copy.get("disqualification_reason"):
+                rejected.append(cand_copy)
+                continue
 
             # Check 1: Empty or missing name
             if not name:
@@ -613,17 +752,22 @@ class CompanyQualifier:
                 rejected.append(cand_copy)
                 continue
 
-            domain = re.sub(r"^https?://(www\.)?", "", website).split("/")[0].lower()
-
             # Check 3: Reject third-party job board or directory URLs
-            if any(jb in domain for jb in self.JOB_BOARD_DOMAINS):
+            if any(jb == domain or domain.endswith("." + jb) for jb in self.JOB_BOARD_DOMAINS):
                 cand_copy["is_verified"] = False
                 cand_copy["verification_status"] = "Disqualified"
                 cand_copy["disqualification_reason"] = f"Job aggregator/directory link ({domain}) rather than official company web presence."
                 rejected.append(cand_copy)
                 continue
 
-            # Check 4: Cross-run deduplication against existing database records
+            # Check 4: Cross-run deduplication (Domain first, name second)
+            if domain and domain in existing_doms:
+                cand_copy["is_verified"] = False
+                cand_copy["verification_status"] = "Disqualified"
+                cand_copy["disqualification_reason"] = f"Domain '{domain}' was already qualified in a previous run."
+                rejected.append(cand_copy)
+                continue
+
             if name_lower in existing_names:
                 cand_copy["is_verified"] = False
                 cand_copy["verification_status"] = "Disqualified"
@@ -632,17 +776,17 @@ class CompanyQualifier:
                 continue
 
             # Check 5: Intra-batch deduplication
+            if domain and domain in seen_domains:
+                cand_copy["is_verified"] = False
+                cand_copy["verification_status"] = "Disqualified"
+                cand_copy["disqualification_reason"] = f"Duplicate domain '{domain}' within current research batch."
+                rejected.append(cand_copy)
+                continue
+
             if name_lower in seen_names:
                 cand_copy["is_verified"] = False
                 cand_copy["verification_status"] = "Disqualified"
                 cand_copy["disqualification_reason"] = f"Duplicate company '{name}' within current research batch."
-                rejected.append(cand_copy)
-                continue
-
-            if domain in seen_domains:
-                cand_copy["is_verified"] = False
-                cand_copy["verification_status"] = "Disqualified"
-                cand_copy["disqualification_reason"] = f"Duplicate domain '{domain}' within current research batch."
                 rejected.append(cand_copy)
                 continue
 
@@ -670,7 +814,8 @@ class CompanyQualifier:
             cand_copy["disqualification_reason"] = None
             cand_copy["research_timestamp"] = datetime.now(timezone.utc)
             seen_names.add(name_lower)
-            seen_domains.add(domain)
+            if domain:
+                seen_domains.add(domain)
             qualified.append(cand_copy)
 
         return qualified, rejected

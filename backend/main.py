@@ -157,6 +157,35 @@ def google_auth_callback(
     except Exception as e:
         return RedirectResponse(url=f"/?auth_error={str(e)}")
 
+@app.get("/api/auth/google/diagnostics")
+def get_gmail_diagnostics():
+    """
+    Live diagnostic probe to Gmail API:
+    Checks profile, validity of credentials, and compose scope permissions.
+    """
+    diag = workflow_manager.gmail_service.check_connection_diagnostics()
+    return diag
+
+@app.post("/api/drafts/test-probe")
+def create_test_draft_probe():
+    """
+    Explicit action to create one clearly labelled test draft in the connected Gmail account
+    without sending it, returning the real Gmail draft ID and message ID.
+    """
+    try:
+        draft = workflow_manager.gmail_service.create_one_test_draft()
+        return {
+            "status": "success",
+            "message": "One unsent test draft successfully created in connected Gmail account.",
+            "draft_id": draft.get("id"),
+            "message_id": draft.get("message", {}).get("id"),
+            "simulated": draft.get("simulated", False),
+            "mode": draft.get("mode", "live"),
+            "connected_account": draft.get("connected_account")
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 # -----------------
 # Runs & Workflow
 # -----------------
@@ -234,6 +263,7 @@ def get_run_details(run_id: int, db: Session = Depends(get_db)):
                 "is_approved": lead.draft.is_approved,
                 "creation_status": lead.draft.creation_status,
                 "gmail_draft_id": lead.draft.gmail_draft_id,
+                "connected_account": getattr(lead.draft, "connected_account", None),
                 "error_message": lead.draft.error_message,
                 "synced_at": lead.draft.synced_at
             }
@@ -241,6 +271,7 @@ def get_run_details(run_id: int, db: Session = Depends(get_db)):
         leads.append({
             "id": lead.id,
             "company_name": lead.company_name,
+            "normalized_domain": getattr(lead, "normalized_domain", None),
             "website": lead.website,
             "industry": lead.industry,
             "overview": lead.overview,
@@ -248,6 +279,7 @@ def get_run_details(run_id: int, db: Session = Depends(get_db)):
             "presence": lead.presence,
             "approach_rationale": lead.approach_rationale,
             "hiring_information": lead.hiring_information,
+            "search_query": getattr(lead, "search_query", None),
             "contact_email": lead.contact_email,
             "contact_name": lead.contact_name,
             "contact_role": lead.contact_role,
@@ -256,6 +288,8 @@ def get_run_details(run_id: int, db: Session = Depends(get_db)):
             "verification_status": lead.verification_status,
             "disqualification_reason": lead.disqualification_reason,
             "research_timestamp": lead.research_timestamp,
+            "first_seen_at": getattr(lead, "first_seen_at", None),
+            "last_seen_at": getattr(lead, "last_seen_at", None),
             "evidence_items": evidence_list,
             "draft": draft_info
         })

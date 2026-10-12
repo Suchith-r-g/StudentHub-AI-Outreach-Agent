@@ -60,6 +60,7 @@ class CompanyLead(Base):
     
     # 1. Company details
     company_name = Column(String, index=True, nullable=False)
+    normalized_domain = Column(String, index=True, nullable=True)
     website = Column(String, nullable=False)
     industry = Column(String, default="Technology / Engineering")
     overview = Column(Text, nullable=False)
@@ -69,6 +70,7 @@ class CompanyLead(Base):
     # 2. Strategic Fit & Hiring Opportunity (strictly factual evidence)
     approach_rationale = Column(Text, nullable=False)   # Why StudentHub should approach it
     hiring_information = Column(Text, nullable=True)    # Careers link, job openings, tech stacks
+    search_query = Column(String, nullable=True)        # Query that discovered this lead
     
     # 3. Contact & Verification
     contact_email = Column(String, nullable=True)       # Sourced contact email (never fabricated)
@@ -80,6 +82,8 @@ class CompanyLead(Base):
     verification_status = Column(String, default="Officially Verified")  # "Officially Verified", "Third-Party Source", "Partially Verified", "Disqualified"
     disqualification_reason = Column(Text, nullable=True)
     research_timestamp = Column(DateTime, default=datetime.utcnow)
+    first_seen_at = Column(DateTime, default=datetime.utcnow)
+    last_seen_at = Column(DateTime, default=datetime.utcnow)
 
     # Relationships
     evidence_items = relationship("LeadEvidence", back_populates="lead", cascade="all, delete-orphan")
@@ -117,6 +121,7 @@ class GmailDraft(Base):
     creation_status = Column(String, default="pending_review")  # "pending_review", "created", "failed", "needs_contact", "simulated_test"
     gmail_draft_id = Column(String, nullable=True, unique=True)
     gmail_message_id = Column(String, nullable=True)
+    connected_account = Column(String, nullable=True)
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     synced_at = Column(DateTime, nullable=True)
@@ -167,6 +172,25 @@ def init_db():
                 cursor.execute("ALTER TABLE scheduled_runs ADD COLUMN provider_used VARCHAR DEFAULT 'serpapi'")
             if "is_test_mode" not in cols:
                 cursor.execute("ALTER TABLE scheduled_runs ADD COLUMN is_test_mode BOOLEAN DEFAULT 0")
+
+            # check company_leads columns
+            cursor.execute("PRAGMA table_info(company_leads)")
+            lead_cols = [col[1] for col in cursor.fetchall()]
+            if "normalized_domain" not in lead_cols:
+                cursor.execute("ALTER TABLE company_leads ADD COLUMN normalized_domain VARCHAR")
+            if "search_query" not in lead_cols:
+                cursor.execute("ALTER TABLE company_leads ADD COLUMN search_query VARCHAR")
+            if "first_seen_at" not in lead_cols:
+                cursor.execute("ALTER TABLE company_leads ADD COLUMN first_seen_at DATETIME")
+            if "last_seen_at" not in lead_cols:
+                cursor.execute("ALTER TABLE company_leads ADD COLUMN last_seen_at DATETIME")
+
+            # check gmail_drafts columns
+            cursor.execute("PRAGMA table_info(gmail_drafts)")
+            draft_cols = [col[1] for col in cursor.fetchall()]
+            if "connected_account" not in draft_cols:
+                cursor.execute("ALTER TABLE gmail_drafts ADD COLUMN connected_account VARCHAR")
+
             conn.commit()
             conn.close()
 
