@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>StudentHub AI Outreach Agent</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Top Navigation Header -->
+    <header class="app-header">
+        <div class="header-container">
+            <div class="brand-group">
+                <div class="brand-logo">
+                    <span class="logo-icon">🎓</span>
+                </div>
+                <div>
+                    <h1 class="brand-title">StudentHub AI Outreach Agent</h1>
+                    <p class="brand-subtitle">Automated Partner Research • Personalized Gmail Drafts • Executive Reports</p>
+                </div>
+            </div>
+            <div class="header-actions">
+                <div id="test-mode-badge" class="badge badge-warning">TEST MODE</div>
+                <div id="gmail-status-pill" class="status-pill status-disconnected">
+                    <span class="dot"></span>
+                    <span id="gmail-status-text">Checking Gmail...</span>
+                </div>
+                <button id="btn-connect-gmail" class="btn btn-secondary">Connect Gmail</button>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <main class="main-content">
+        <!-- Control Bar & Scheduling Section -->
+        <section class="card control-card">
+            <div class="control-grid">
+                <!-- Schedule Controls -->
+                <div class="control-col">
+                    <h3 class="section-heading">
+                        <span class="heading-icon">⏰</span> Automated Background Scheduler
+                    </h3>
+                    <p class="section-desc">Reliable APScheduler cron running in background. No frontend timer needed.</p>
+                    <div class="form-row">
+                        <label class="toggle-switch">
+                            <input type="checkbox" id="schedule-active">
+                            <span class="slider"></span>
+                        </label>
+                        <span id="schedule-status-label" class="label-text">Schedule Inactive</span>
+                    </div>
+                    <div class="form-inputs-inline">
+                        <div class="input-group">
+                            <label for="schedule-time">Run Time (24h)</label>
+                            <input type="time" id="schedule-time" value="09:00" class="input-field">
+                        </div>
+                        <div class="input-group">
+                            <label for="schedule-tz">Timezone</label>
+                            <select id="schedule-tz" class="input-field select-field">
+                                <option value="Asia/Kolkata">Asia/Kolkata (IST)</option>
+                                <option value="UTC">UTC</option>
+                                <option value="America/New_York">America/New_York (EST)</option>
+                                <option value="Europe/London">Europe/London (GMT)</option>
+                            </select>
+                        </div>
+                        <div class="input-group">
+                            <label for="owner-email">Report Recipient Email</label>
+                            <input type="email" id="owner-email" value="suchithreddy@studenthub.co" class="input-field">
+                        </div>
+                        <button id="btn-save-schedule" class="btn btn-outline">Save Schedule</button>
+                    </div>
+                </div>
+
+                <!-- Instant Action Button -->
+                <div class="control-col action-col">
+                    <div class="action-banner">
+                        <div class="action-info">
+                            <h4 class="action-title">Run 10-Company Research Now</h4>
+                            <p class="action-subtitle">Executes search, qualifies 10 verified firms, generates personalized drafts, & sends executive report.</p>
+                        </div>
+                        <button id="btn-run-now" class="btn btn-primary btn-large">
+                            <span class="btn-icon">⚡</span> Run Workflow Now
+                        </button>
+                    </div>
+                    <div id="run-progress-box" class="progress-box hidden">
+                        <div class="spinner"></div>
+                        <span id="run-progress-text">Researching and verifying candidate companies...</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Notification Toast -->
+        <div id="toast" class="toast hidden"></div>
+
+        <!-- Latest Run Metrics Banner -->
+        <section id="run-summary-section" class="card summary-card hidden">
+            <div class="summary-header">
+                <div>
+                    <span id="run-id-tag" class="tag">RUN #1</span>
+                    <h2 class="summary-title">Execution Overview</h2>
+                    <span id="run-timestamp" class="timestamp">Just now</span>
+                </div>
+                <div class="summary-actions">
+                    <a id="btn-view-report" href="#" target="_blank" class="btn btn-secondary">
+                        📄 View HTML Research Report
+                    </a>
+                    <button id="btn-approve-batch" class="btn btn-success">
+                        ✉️ Approve & Create 10 Gmail Drafts
+                    </button>
+                </div>
+            </div>
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <span class="kpi-label">Researched</span>
+                    <span id="kpi-researched" class="kpi-val">0</span>
+                </div>
+                <div class="kpi-card highlight-green">
+                    <span class="kpi-label">Verified & Qualified</span>
+                    <span id="kpi-verified" class="kpi-val">0</span>
+                </div>
+                <div class="kpi-card highlight-blue">
+                    <span class="kpi-label">Gmail Drafts Created</span>
+                    <span id="kpi-drafted" class="kpi-val">0</span>
+                </div>
+                <div class="kpi-card highlight-purple">
+                    <span class="kpi-label">Owner Report Status</span>
+                    <span id="kpi-report-status" class="kpi-val kpi-text">Pending</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Researched Companies & Evidence Review Table -->
+        <section id="leads-section" class="card hidden">
+            <div class="table-header">
+                <div>
+                    <h3 class="section-heading">Researched Companies & Ground-Truth Evidence</h3>
+                    <p class="section-desc">Strictly verified against public web sources. Select any company to preview personalized founder email.</p>
+                </div>
+                <div id="batch-stats-badge" class="badge badge-info">10 Qualified Candidates</div>
+            </div>
+
+            <div class="leads-container" id="leads-list">
+                <!-- Dynamically generated company cards -->
+            </div>
+        </section>
+
+        <!-- History Section -->
+        <section class="card history-card">
+            <h3 class="section-heading">Audit & Research History</h3>
+            <p class="section-desc">Prior execution runs, report dispatches, and draft creation logs.</p>
+            <div class="table-wrapper">
+                <table class="data-table">
+                    <thead>
+                        <tr>
+                            <th>Run ID</th>
+                            <th>Trigger</th>
+                            <th>Status</th>
+                            <th>Researched</th>
+                            <th>Verified</th>
+                            <th>Drafts</th>
+                            <th>Report Sent</th>
+                            <th>Started At</th>
+                            <th>Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-table-body">
+                        <tr>
+                            <td colspan="9" class="text-center text-muted">No runs executed yet. Click "Run Workflow Now" above.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <!-- Email Preview Modal -->
+    <div id="preview-modal" class="modal hidden">
+        <div class="modal-backdrop" id="modal-close-backdrop"></div>
+        <div class="modal-dialog">
+            <div class="modal-header">
+                <div>
+                    <span class="badge badge-primary">Personalized Outreach Draft</span>
+                    <h3 id="modal-company-title" class="modal-title">Company Name</h3>
+                </div>
+                <button class="modal-close-btn" id="modal-close-btn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="email-meta-box">
+                    <div class="meta-row">
+                        <span class="meta-key">To:</span>
+                        <span class="meta-val" id="modal-recipient">recipient@company.com</span>
+                    </div>
+                    <div class="meta-row">
+                        <span class="meta-key">From:</span>
+                        <span class="meta-val">Suchithreddy G &lt;suchithreddy@studenthub.co&gt;</span>
+                    </div>
+                    <div class="meta-row">
+                        <span class="meta-key">Subject:</span>
+                        <span class="meta-val" id="modal-subject">Founding hiring partnership</span>
+                    </div>
+                    <div class="meta-row">
+                        <span class="meta-key">Gmail Draft ID:</span>
+                        <span class="meta-val" id="modal-draft-id">Pending User Approval</span>
+                    </div>
+                </div>
+
+                <div class="email-body-content">
+                    <pre id="modal-body-text" class="email-text"></pre>
+                </div>
+
+                <div class="evidence-sources-box">
+                    <h5 class="sources-title">Sourced Ground-Truth Evidence:</h5>
+                    <ul id="modal-sources-list" class="modal-sources-list"></ul>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" id="modal-btn-cancel">Close</button>
+                <button class="btn btn-success" id="modal-btn-approve-single">Approve & Create Draft in Gmail</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
