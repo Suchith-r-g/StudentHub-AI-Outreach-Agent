@@ -10,7 +10,7 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 from backend.config import settings
-from backend.models import OAuthToken, SessionLocal
+from backend.models import OAuthToken, OAuthState, SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ class GmailService:
     def scopes(self) -> list[str]:
         return settings.GMAIL_SCOPES
 
-    def get_oauth_flow(self) -> Flow:
+    def get_oauth_flow(self, state: Optional[str] = None) -> Flow:
         if not settings.GOOGLE_CLIENT_ID or not settings.GOOGLE_CLIENT_SECRET:
             raise ValueError("GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET is missing from environment.")
 
@@ -46,7 +46,8 @@ class GmailService:
         flow = Flow.from_client_config(
             client_config,
             scopes=self.scopes,
-            redirect_uri=settings.GOOGLE_REDIRECT_URI
+            redirect_uri=settings.GOOGLE_REDIRECT_URI,
+            state=state
         )
         return flow
 
@@ -57,10 +58,33 @@ class GmailService:
             include_granted_scopes="true",
             prompt="consent"
         )
+        
+        # Save code_verifier mapped by state for PKCE callback verification
+        code_verifier = getattr(flow, "code_verifier", None)
+        if state and code_verifier:
+            db = SessionLocal()
+            try:
+                state_record = OAuthState(state=state, code_verifier=code_verifier)
+                db.merge(state_record)
+                db.commit()
+            finally:
+                db.close()
+
         return authorization_url
 
-    def exchange_code_for_token(self, code: str) -> OAuthToken:
-        flow = self.get_oauth_flow()
+    def exchange_code_for_token(self, code: str, state: Optional[str] = None) -> OAuthToken:
+        flow = self.get_oauth_flow(state=state)
+
+        # Restore code_verifier from DB if state was passed
+        if state:
+            db = SessionLocal()
+            try:
+                st = db.query(OAuthState).filter(OAuthState.state == state).first()
+                if st and st.code_verifier:
+                    flow.code_verifier = st.code_verifier
+            finally:
+                db.close()
+
         flow.fetch_token(code=code)
         creds = flow.credentials
 
@@ -87,6 +111,12 @@ class GmailService:
             token_record.updated_at = datetime.now(timezone.utc)
             db.commit()
             db.refresh(token_record)
+
+            # Cleanup used OAuthState
+            if state:
+                db.query(OAuthState).filter(OAuthState.state == state).delete()
+                db.commit()
+
             return token_record
         finally:
             db.close()

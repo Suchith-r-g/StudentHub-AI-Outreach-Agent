@@ -138,6 +138,13 @@ class OAuthToken(Base):
     connected_email = Column(String, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+class OAuthState(Base):
+    __tablename__ = "oauth_states"
+
+    state = Column(String, primary_key=True)
+    code_verifier = Column(String, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 engine = create_engine(
     settings.DATABASE_URL,
     connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}

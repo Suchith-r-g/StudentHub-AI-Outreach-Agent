@@ -141,14 +141,18 @@ def get_google_auth_url():
         raise HTTPException(status_code=500, detail=f"Failed to generate OAuth URL: {str(e)}")
 
 @app.get("/api/auth/google/callback")
-def google_auth_callback(code: Optional[str] = Query(None), error: Optional[str] = Query(None)):
+def google_auth_callback(
+    code: Optional[str] = Query(None),
+    state: Optional[str] = Query(None),
+    error: Optional[str] = Query(None)
+):
     if error:
         return RedirectResponse(url=f"/?auth_error={error}")
     if not code:
         return RedirectResponse(url="/?auth_error=no_code_provided")
 
     try:
-        workflow_manager.gmail_service.exchange_code_for_token(code)
+        workflow_manager.gmail_service.exchange_code_for_token(code=code, state=state)
         return RedirectResponse(url="/?auth_success=1")
     except Exception as e:
         return RedirectResponse(url=f"/?auth_error={str(e)}")
